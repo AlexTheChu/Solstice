@@ -144,7 +144,9 @@ export class ConversationDraftCache extends Cache<ConversationDraftRecord> {
     if (this.diskSaveTimerInSeconds < MIN_CACHE_DISK_SAVE_IN_SECONDS)
       this.diskSaveTimerInSeconds = MIN_CACHE_DISK_SAVE_IN_SECONDS;
 
-    const { current, legacy } = sanitizeDrafts(getDrafts());
+    // Awaited: getDrafts is synchronous on desktop, but the mobile host reads through an
+    // asynchronous native bridge (mobile/shims/electron-filesystem.js).
+    const { current, legacy } = sanitizeDrafts(await getDrafts());
     this.cache = current;
     this.legacyDrafts = legacy;
 
@@ -238,6 +240,17 @@ export class ConversationDraftCache extends Cache<ConversationDraftRecord> {
     if (!(k in this.cache)) return;
 
     delete this.cache[k];
+    this.saveCacheToDisk(true);
+  }
+
+  /**
+   * Write the cache out now, ignoring the periodic timer and the write buffer. Mobile calls this when the app goes
+   * to the background: either host can kill the process from there without running any more JavaScript, so whatever
+   * the timer has not saved yet would be lost (issue #27).
+   * @function
+   * @internal
+   */
+  flushToDisk(): void {
     this.saveCacheToDisk(true);
   }
 

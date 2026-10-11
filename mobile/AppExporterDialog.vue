@@ -153,7 +153,9 @@
                                         if (!charMap.has(charName)) charMap.set(charName, { hasLogs: false, hasSettings: false });
                                         const info = charMap.get(charName)!;
                                         if (parts[2] === 'logs') info.hasLogs = true;
-                                        if (parts[2] === 'settings') info.hasSettings = true;
+                                        // drafts.txt sits beside the category folders and is imported
+                                        // under the character-settings toggle, so it counts as one.
+                                        if (parts[2] === 'settings' || parts[2] === 'drafts.txt') info.hasSettings = true;
                                     }
                                     vm.importCharacters = Array.from(charMap.entries())
                                         .sort(([a], [b]) => a.localeCompare(b))
@@ -355,6 +357,21 @@
                                     const charName = parts[1];
                                     // Names were gathered in the pre-pass above; skip them here.
                                     if (parts.length === 3 && parts[2] === 'logs-names.json') continue;
+                                    // Message drafts sit at the character root in the PC layout rather than
+                                    // under a category, and count as character state for the import toggle.
+                                    if (parts.length === 3 && parts[2] === 'drafts.txt') {
+                                        if (!vm.importIncludeCharacterSettings) continue;
+                                        if (!selectedChars.has(charName)) continue;
+                                        ensureDir(charName);
+                                        try {
+                                            await NativeFile.write(`${charName}/drafts.txt`, entry.getData().toString('utf8'));
+                                        } catch (e) {
+                                            unwritable++;
+                                            if (unwritable <= 5)
+                                                await trace.log(`unwritable ${lastEntry}: ${(e as Error).name}: ${(e as Error).message}`);
+                                        }
+                                        continue;
+                                    }
                                     if (parts.length < 4) continue; // need characters/CharName/category/file
                                     if (!selectedChars.has(charName)) continue;
                                     const category = parts[2];
@@ -387,7 +404,7 @@
                                                 await trace.log(`unwritable ${lastEntry}: ${(e as Error).name}: ${(e as Error).message}`);
                                         }
                                     }
-                                    // drafts.txt and other PC-only entries are skipped on mobile
+                                    // Other PC-only entries (eicons, json logs) are skipped on mobile
 
                                 } else {
                                     // — Mobile format —

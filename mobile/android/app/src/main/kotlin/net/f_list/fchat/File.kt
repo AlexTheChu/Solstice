@@ -133,8 +133,12 @@ class File(private val ctx: Context) {
 		}
 	}
 
-	// Extensions that are internal SQLite/journal files — never include in exports.
+	// Extensions that are internal SQLite/journal files - never include in exports.
 	private val skippedExtensions = setOf(".db", ".db-wal", ".db-shm", ".db-journal")
+
+	// Message drafts, written per character by mobile/shims/electron-filesystem.js. Named here
+	// because the export has to place it at the character root, where Horizon keeps it.
+	private val draftsFile = "drafts.txt"
 
 	@JavascriptInterface
 	fun exportData(): String {
@@ -173,7 +177,7 @@ class File(private val ctx: Context) {
 			val includes = JSONObject().apply {
 				put("generalSettings", settingsFile.exists())
 				put("logs", true)
-				put("drafts", false)
+				put("drafts", charDirs.any { File(it, draftsFile).exists() })
 				put("characterSettings", true)
 				put("pinned", true)
 				put("eicons", false)
@@ -279,6 +283,10 @@ class File(private val ctx: Context) {
 						FileInputStream(logFile).use { it.copyTo(out) }
 					}
 				}
+			} else if (file.isFile && file.name == draftsFile) {
+				// Message drafts sit at the character root in Horizon's layout, not under settings/.
+				out.putNextEntry(ZipEntry("$charPrefix/$draftsFile"))
+				FileInputStream(file).use { it.copyTo(out) }
 			} else if (file.isFile) {
 				// Character settings files (settings, pinned, modes, etc.) go under
 				// characters/<name>/settings/<file> to match Horizon's expected layout.

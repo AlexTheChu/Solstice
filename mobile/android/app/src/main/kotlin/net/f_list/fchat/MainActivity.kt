@@ -297,6 +297,11 @@ class MainActivity : Activity() {
 	override fun onPause() {
 		super.onPause()
 		webView.clearFocus()
+		// Issue 27: message drafts only reach disk on a timer, and Android can kill the process out of
+		// the background without running any more JavaScript. A WebView's document visibility follows
+		// the view rather than the activity lifecycle, so visibilitychange is not dependable here;
+		// nudge the web layer directly. The flush itself writes through the synchronous File bridge.
+		webView.evaluateJavascript("window.solsticeFlushDrafts && window.solsticeFlushDrafts()", null)
 	}
 
 	override fun onDestroy() {

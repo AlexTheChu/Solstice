@@ -41,6 +41,7 @@ import Axios from 'axios';
 import Vue from 'vue';
 import {ipcMain} from 'electron';
 import core, {init as initCore} from '../chat/core';
+import type {Core} from '../chat/core';
 import {AdCoordinatorHost} from '../chat/ads/ad-coordinator-host';
 import Socket from '../chat/WebSocket';
 import NativeSocketConnection from './NativeSocketConnection';
@@ -290,6 +291,33 @@ if (document.documentElement.dataset.mobilePlatform === 'true') {
     logDiag('boot', document.documentElement.dataset.mobileOs);
     document.addEventListener('visibilitychange', () =>
         logDiag('visibility', document.visibilityState));
+}
+
+// Issue 27: the draft cache only reaches disk on a timer (60s by default, 5s minimum), and both hosts
+// can kill the app straight out of the background without running any more JavaScript, so anything
+// typed since the last save was lost. Force a save on the way out. The focused conversation's text is
+// pushed into the cache first because chat/conversations.ts only does that once a second, so the cache
+// can be a keystroke behind at this point. Drafts are keyed by conversation name here, matching
+// chat/conversations.ts (see the revert of "key message drafts by conversation key", issue #409).
+//
+// Reached two ways, both idempotent: `visibilitychange`, which WKWebView fires reliably when the app
+// backgrounds, and the `solsticeFlushDrafts` global, which MainActivity calls from onPause because an
+// Android WebView's document visibility tracks the view, not the activity lifecycle.
+function flushDrafts(): void {
+    // Nothing to save until initCore has run (the Core type pretends these always exist).
+    if ((<Partial<Core>>core).cache === undefined || !core.connection.isOpen) return;
+
+    const conversation = core.conversations.selectedConversation;
+    if (conversation !== undefined && conversation.enteredText !== '')
+        core.cache.registerConversationDraft(conversation.name, conversation.enteredText);
+    core.cache.conversationDraftCache.flushToDisk();
+}
+
+if (document.documentElement.dataset.mobilePlatform === 'true') {
+    (<any>window)['solsticeFlushDrafts'] = flushDrafts; //tslint:disable-line:no-any
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushDrafts();
+    });
 }
 
 // Issue 10: long-pressing a link/eicon/avatar can start a native HTML5 drag of the element, which on

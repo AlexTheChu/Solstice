@@ -1279,6 +1279,9 @@ async function initConversationCache(this: Conversation): Promise<void> {
 
   // Solstice keys drafts by conversation name; the upstream switch to unique keys was
   // reverted here (see the revert of "key message drafts by conversation key", issue #409).
+  // Pre-key records from an imported backup are quarantined under their stored name until a
+  // conversation claims them, and name is what Solstice looks drafts up by, so claim by name.
+  core.cache.migrateConversationDraft(this.name, this.name);
   const draft = core.cache.getConversationDraft(this.name);
   this.enteredText = draft;
 
