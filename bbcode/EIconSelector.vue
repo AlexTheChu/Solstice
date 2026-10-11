@@ -29,6 +29,10 @@
               v-model="search"
               ref="search"
               :placeholder="l('eicon.searchPlaceholder')"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
               @input="searchUpdateDebounce()"
               tabindex="0"
               @click.prevent.stop="setFocus()"
@@ -212,6 +216,9 @@
 
   let store: EIconStore | undefined;
 
+  /** Every name in the eicon index uses only these characters. */
+  const EICON_NAME = /^[a-z0-9 _-]+$/;
+
   export default CustomDialog.extend({
     components: { modal, draggable, 'localized-text': LocalizedText },
     props: {
@@ -320,7 +327,9 @@
       },
 
       runSearch() {
-        let s = this.search.toLowerCase();
+        // Mobile keyboards append a space after a picked suggestion; eicon names never start or end
+        // with one, so an untrimmed query matched nothing (issue 23).
+        let s = this.search.toLowerCase().trim();
         const bbcodeMatch = s.match(/^\[eicon\](.*?)\[\/eicon\]\s*$/i);
         if (bbcodeMatch) {
           s = bbcodeMatch[1].trim();
@@ -335,7 +344,13 @@
         } else if (s.length === 0) {
           this.allResults = [...(store?.nextPage(this.random_max) || [])];
         } else {
-          this.allResults = store?.search(s) || [];
+          const found = store?.search(s) || [];
+          // The eicon index (xariah.net) can lag behind F-List, so a freshly uploaded eicon may not
+          // be searchable yet. Offer the typed name itself as the last tile; F-List serves a
+          // placeholder for names it does not know, so the tile previews what would be sent. Last,
+          // so partial queries with plenty of real matches never lead with it.
+          if (EICON_NAME.test(s) && !found.includes(s)) found.push(s);
+          this.allResults = found;
         }
 
         this.results = this.allResults.slice(0, this.displayedCount);
@@ -382,10 +397,16 @@
       async refreshIcons(): Promise<void> {
         this.refreshing = true;
 
-        await store?.checkForUpdates();
-        this.runSearch();
+        // A failed update must not leave the picker stuck on the loading spinner (issue 23).
+        try {
+          await store?.checkForUpdates();
+        } catch (e) {
+          console.error('eicons.refresh.failure', e);
+        } finally {
+          this.refreshing = false;
+        }
 
-        this.refreshing = false;
+        this.runSearch();
 
         this.$nextTick(() => {
           const resultsContainer = this.$refs[

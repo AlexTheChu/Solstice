@@ -51,5 +51,14 @@ module.exports = {
     },
     ipcMain: {
         on: (channel, fn) => { mainHandlers[channel] = fn; },
+        // Electron's ipcMain is an EventEmitter, so emit() is a main-local dispatch with the args
+        // passed as-is (no event object). Shared code reaches it through @electron/remote: the eicon
+        // store announces 'eicons.reload' after every save, and without emit() that call threw and
+        // left the eicon picker's refresh spinning forever (issue 23).
+        emit: (channel, ...args) => {
+            const handler = mainHandlers[channel];
+            if (handler) handler.apply(null, args);
+            return !!handler;
+        },
     },
 };

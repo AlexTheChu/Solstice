@@ -31,6 +31,8 @@ module.exports = {
         getPath: () => '/',
         getVersion: () => '',
     },
+    // Same in-process bus as the 'electron' shim, since main and renderer share the WebView here.
+    ipcMain: require('./electron').ipcMain,
     shell: { openExternal: noop },
     nativeTheme: { shouldUseDarkColors: false, on: noop },
     session: { defaultSession: { availableSpellCheckerLanguages: [] } },
