@@ -22,6 +22,11 @@ name: Build iOS (SideStore)
 # The release-tag attachment only uploads assets (gh release upload) without touching the release's
 # draft state, so the Android release pipeline (build.yml) is unaffected. Every run also archives the
 # .ipa as a private workflow artifact.
+#
+# One rule governs both manifests: SideStore compares the version in the source against the
+# CFBundleShortVersionString of the app it downloads and refuses the install when they differ, so
+# the manifests take their version AND their minOSVersion straight out of the built Info.plist
+# instead of from this workflow's own variables (issue #41).
 
 permissions:
   contents: write
@@ -70,6 +75,21 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # A `-dev.`/`-beta.` tag is a test build; anything else is a real release. Mirrors the same
+      # check in build.yml, which drafts stable releases and publishes pre-releases directly. This
+      # runs unconditionally, rather than only on a tag push, because the version stamp below now
+      # depends on the channel; pull requests and manual dispatch resolve to stable=false.
+      - name: Detect release channel
+        id: channel
+        run: |
+          TAG="${{ github.ref_name }}"
+          STABLE=false
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/v* ]]; then
+            if [[ "$TAG" != *"-dev."* && "$TAG" != *"-beta."* ]]; then STABLE=true; fi
+          fi
+          echo "stable=${STABLE}" >> "$GITHUB_OUTPUT"
+          echo "Tag ${TAG} -> stable=${STABLE}"
+
       - name: Read app version
         id: version
         run: |
@@ -77,21 +97,17 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           # Use a monotonic build number from the run number.
           echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          # Unique, incrementing version per build (package version + run number). The bare package
-          # version is constant across rolling builds, so SideStore never saw a change and offered
-          # no update; stamping the run number makes each build newer than the last installed one.
-          echo "display=${version}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      # A `-dev.`/`-beta.` tag is a test build; anything else is a real release. Mirrors the same
-      # check in build.yml, which drafts stable releases and publishes pre-releases directly.
-      - name: Detect release channel
-        id: channel
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        run: |
-          TAG="${{ github.ref_name }}"
-          if [[ "$TAG" == *"-dev."* || "$TAG" == *"-beta."* ]]; then STABLE=false; else STABLE=true; fi
-          echo "stable=${STABLE}" >> "$GITHUB_OUTPUT"
-          echo "Tag ${TAG} -> stable=${STABLE}"
+          # `display` becomes the app's CFBundleShortVersionString, and SideStore refuses to install
+          # when the version in the source manifest differs from the one in the downloaded app
+          # (issue #41). A stable release therefore gets the bare package version, so the store
+          # advertises the same number as the GitHub release and the Android APKs. Test builds keep
+          # the run number appended: the package version is constant across rolling builds, so
+          # without it SideStore never sees a change and offers no update.
+          if [ "${{ steps.channel.outputs.stable }}" = "true" ]; then
+            echo "display=${version}" >> "$GITHUB_OUTPUT"
+          else
+            echo "display=${version}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate Xcode project
         working-directory: mobile/ios
@@ -131,6 +147,7 @@ jobs:
             clean build
 
       - name: Package IPA (ad-hoc signed)
+        id: package
         working-directory: mobile/ios
         run: |
           APP="build/Build/Products/Release-iphoneos/Solstice.app"
@@ -147,6 +164,20 @@ jobs:
           IPA="Solstice-${{ steps.version.outputs.version }}.ipa"
           zip -qry "$IPA" Payload
           echo "Built $IPA ($(du -h "$IPA" | cut -f1))"
+          # Both SideStore manifests below are filled from these two values rather than from the
+          # workflow's own inputs, so the manifest can never disagree with the app it points at.
+          # A mismatched version aborts the install outright (issue #41), and an OS floor lower
+          # than the real deployment target offers the app to devices that cannot run it.
+          SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")"
+          MINOS="$(plutil -extract MinimumOSVersion raw "$APP/Info.plist")"
+          case "$MINOS" in
+            *.*.*) ;;
+            *.*) MINOS="${MINOS}.0" ;;
+            *) MINOS="${MINOS}.0.0" ;;
+          esac
+          echo "short_version=${SHORT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "minos=${MINOS}" >> "$GITHUB_OUTPUT"
+          echo "Packaged version ${SHORT_VERSION}, minimum iOS ${MINOS}"
 
       # Private distribution: the IPA is published only as a workflow artifact (collaborators
       # only), never attached to a public release. Download it with
@@ -170,17 +201,16 @@ jobs:
           IPA="Solstice-${{ steps.version.outputs.version }}.ipa"
           URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${IPA}"
           mkdir -p stable
-          node - "${{ steps.version.outputs.version }}" "$(date -u +%Y-%m-%d)" "$(stat -f%z "$IPA")" "$URL" "${{ github.ref_name }}" <<'NODE'
+          node - "${{ steps.package.outputs.short_version }}" "$(date -u +%Y-%m-%d)" "$(stat -f%z "$IPA")" "$URL" "${{ github.ref_name }}" "${{ steps.package.outputs.minos }}" <<'NODE'
           const fs = require('fs');
-          const [version, date, size, url, tag] = process.argv.slice(2);
+          const [version, date, size, url, tag, minOSVersion] = process.argv.slice(2);
           const src = JSON.parse(fs.readFileSync('sidestore-source.json', 'utf8'));
           const app = src.apps[0];
           const notes = `Solstice ${tag}. See the GitHub release notes for what changed.`;
           Object.assign(app, { version, versionDate: date, versionDescription: notes,
-                               size: Number(size), downloadURL: url });
-          app.minOSVersion = '14.0.0';
+                               size: Number(size), downloadURL: url, minOSVersion });
           app.versions = [{ version, date, localizedDescription: notes,
-                            downloadURL: url, size: Number(size), minOSVersion: '14.0.0' }];
+                            downloadURL: url, size: Number(size), minOSVersion }];
           fs.writeFileSync('stable/sidestore-source.json', JSON.stringify(src, null, 2));
           NODE
 
@@ -192,9 +222,9 @@ jobs:
         run: |
           cp "Solstice-${{ steps.version.outputs.version }}.ipa" Solstice.ipa
           URL="${{ github.server_url }}/${{ github.repository }}/releases/download/ios-latest/Solstice.ipa"
-          node - "${{ steps.version.outputs.display }}" "$(date -u +%Y-%m-%d)" "$(stat -f%z Solstice.ipa)" "$URL" <<'NODE'
+          node - "${{ steps.package.outputs.short_version }}" "$(date -u +%Y-%m-%d)" "$(stat -f%z Solstice.ipa)" "$URL" "${{ steps.package.outputs.minos }}" <<'NODE'
           const fs = require('fs');
-          const [version, date, size, url] = process.argv.slice(2);
+          const [version, date, size, url, minOSVersion] = process.argv.slice(2);
           const src = JSON.parse(fs.readFileSync('sidestore-source.json', 'utf8'));
           const app = src.apps[0];
           // Distinct source name/identifier from the stable channel, so someone who adds both
@@ -204,10 +234,10 @@ jobs:
           src.name = 'Solstice (Test)';
           src.identifier = 'net.flist.solstice.source.test';
           app.name = 'Solstice (Test)';
-          Object.assign(app, { version, versionDate: date, size: Number(size), downloadURL: url });
-          app.minOSVersion = '14.0.0';
+          Object.assign(app, { version, versionDate: date, size: Number(size),
+                               downloadURL: url, minOSVersion });
           app.versions = [{ version, date, localizedDescription: 'Rolling iOS test build.',
-                            downloadURL: url, size: Number(size), minOSVersion: '14.0.0' }];
+                            downloadURL: url, size: Number(size), minOSVersion }];
           fs.writeFileSync('sidestore-source.json', JSON.stringify(src, null, 2));
           NODE
 
